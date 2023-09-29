@@ -1,3 +1,5 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use anyhow::anyhow;
 use serenity::model::channel::Message;
 use serenity::model::gateway::Ready;
@@ -70,8 +72,28 @@ impl EventHandler for Bot {
                 .reply(ctx, "gnn gnn gnn ça existe pas les lib rust pour discord")
                 .await
             {
-                eprintln!("Error sending message: {:?}", err);
+                eprintln!("Error sending selim message: {:?}", err);
             }
+        } else if msg.content == "!ping" {
+            let time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            let mut message = msg.reply(ctx.clone(), "Pinging...").await.unwrap();
+            let latency_timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+                - time;
+
+            let latency_ms = latency_timestamp.to_string();
+
+            message
+                .edit(&ctx, |m| {
+                    m.content(format!("Pong! 🏓 Latency: {}ms", latency_ms))
+                })
+                .await
+                .unwrap();
         }
     }
 
