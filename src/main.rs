@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
+use chrono::{TimeZone, Utc};
 use serenity::model::channel::Message;
 use serenity::model::gateway::Ready;
 use serenity::prelude::*;
@@ -22,6 +23,7 @@ impl EventHandler for Bot {
             "!rust" => rust_command(&ctx, &msg).await,
             "!selim" => selim_command(&ctx, &msg).await,
             "!ping" => ping_command(&ctx, &msg).await,
+            "!planning" => planning_command(&ctx, &msg).await,
             _ => {}
         }
     }
@@ -130,7 +132,137 @@ async fn ping_command(ctx: &Context, msg: &Message) {
         .await
         .unwrap();
 }
+async fn format_for_discord(ctx: &Context, msg: &Message, response: &str) {
+    // Parsez la réponse JSON
+    let data: serde_json::Value = serde_json::from_str(response).unwrap();
 
+    // Vérifiez si la clé "result" existe et est un tableau
+    if let Some(reservations) = data["result"].as_array() {
+        let mut grouped_by_day: std::collections::HashMap<String, Vec<&serde_json::Value>> =
+            std::collections::HashMap::new();
+        for reservation in reservations {
+            if let Some(start_date) = reservation["start_date"].as_i64() {
+                let date = Utc
+                    .timestamp_millis(start_date)
+                    .format("%Y-%m-%d")
+                    .to_string();
+                grouped_by_day
+                    .entry(date)
+                    .or_insert_with(Vec::new)
+                    .push(reservation);
+            }
+        }
+
+        // Créez un embed pour chaque jour
+        for (day, day_reservations) in grouped_by_day {
+            let mut embed = CreateEmbed::default();
+            embed
+                .title(format!("Cours pour le {}", day))
+                .color(Colour::from_rgb(114, 137, 218)) // Une couleur bleue Discord
+                .footer(|f| f.text("Mis à jour le"))
+                .timestamp(&*Utc::now().to_rfc3339());
+
+            for courses_day in day_reservations {
+                let course_name = courses_day["name"].as_str().unwrap_or("Inconnu");
+                let teacher = courses_day["discipline"]["teacher"]
+                    .as_str()
+                    .unwrap_or("Inconnu");
+                let start_time = Utc
+                    .timestamp_millis(courses_day["start_date"].as_i64().unwrap_or(0))
+                    .format("%H:%M")
+                    .to_string();
+                let end_time = Utc
+                    .timestamp_millis(courses_day["end_date"].as_i64().unwrap_or(0))
+                    .format("%H:%M")
+                    .to_string();
+                let room_name = courses_day["rooms"][0]["name"]
+                    .as_str()
+                    .unwrap_or("Inconnu");
+
+                embed.field(
+                    course_name,
+                    format!(
+                        "Enseignant: **{}**\nHeure: **{} - {}**\nSalle: **{}**",
+                        teacher, start_time, end_time, room_name
+                    ),
+                    false,
+                );
+            }
+
+            // Envoyez l'embed à Discord
+            if let Err(err) = msg
+                .channel_id
+                .send_message(&ctx.http, |m| m.set_embed(embed))
+                .await
+            {
+                eprintln!("Error sending embed message: {:?}", err);
+            }
+        }
+    }
+}
+
+async fn planning_command(ctx: &Context, msg: &Message) {
+    let username = "npierrot";
+    let password = "Fk59vWay#-Fhviy55";
+
+    // Encodage en base64 des identifiants pour l'authentification
+    let auth_credentials = base64::encode(format!("{}:{}", username, password));
+
+    // Tentative d'authentification et récupération du jeton d'accès
+    let client = reqwest::Client::new();
+    let response = client
+        .get("https://authentication.kordis.fr/oauth/authorize?response_type=token&client_id=skolae-app")
+        .header("Authorization", format!("Basic {}", auth_credentials))
+        .send()
+        .await;
+
+    if let Ok(resp) = response {
+        if let Some(redirect_url) = resp.headers().get("location") {
+            let access_token: Vec<&str> = redirect_url
+                .to_str()
+                .unwrap()
+                .split("access_token=")
+                .collect();
+            if access_token.len() > 1 {
+                let token = access_token[1].split("&").next().unwrap();
+
+                // Récupération du planning
+                let start_timestamp = Utc.ymd(2023, 10, 25).and_hms(0, 0, 0).timestamp_millis();
+                let end_timestamp = Utc.ymd(2023, 11, 25).and_hms(0, 0, 0).timestamp_millis();
+                let agenda_url = format!(
+                    "https://api.kordis.fr/me/agenda?start={}&end={}",
+                    start_timestamp, end_timestamp
+                );
+                let agenda_response = client
+                    .get(&agenda_url)
+                    .header("Authorization", format!("Bearer {}", token))
+                    .send()
+                    .await;
+
+                if let Ok(agenda_resp) = agenda_response {
+                    let agenda: String = agenda_resp.text().await.unwrap_or_default();
+                    println!("{}", agenda);
+                    format_for_discord(ctx, msg, &agenda).await;
+                } else {
+                    msg.channel_id
+                        .say(&ctx.http, "Erreur lors de la récupération de l'agenda.")
+                        .await
+                        .unwrap();
+                }
+            } else {
+                msg.channel_id
+                    .say(&ctx.http, "Erreur lors de l'authentification.")
+                    .await
+                    .unwrap();
+            }
+        }
+    } else {
+        msg.channel_id
+            .say(&ctx.http, "Erreur lors de la connexion à l'API Kordis.")
+            .await
+            .unwrap();
+    }
+}
 #[shuttle_runtime::main]
 async fn serenity(
     #[shuttle_secrets::Secrets] secret_store: SecretStore,
