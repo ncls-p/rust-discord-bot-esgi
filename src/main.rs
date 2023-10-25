@@ -1,3 +1,4 @@
+use std::ops::Add;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
@@ -137,66 +138,63 @@ async fn format_for_discord(ctx: &Context, msg: &Message, response: &str) {
     let data: serde_json::Value = serde_json::from_str(response).unwrap();
 
     // Vérifiez si la clé "result" existe et est un tableau
-    if let Some(reservations) = data["result"].as_array() {
-        let mut grouped_by_day: std::collections::HashMap<String, Vec<&serde_json::Value>> =
-            std::collections::HashMap::new();
-        for reservation in reservations {
-            if let Some(start_date) = reservation["start_date"].as_i64() {
-                let date = Utc
-                    .timestamp_millis(start_date)
-                    .format("%Y-%m-%d")
-                    .to_string();
-                grouped_by_day
-                    .entry(date)
-                    .or_insert_with(Vec::new)
-                    .push(reservation);
-            }
+    if let Some(mut courses_day) = data["result"].as_array().cloned() {
+        // Trier les réservations par date et heure de début
+        courses_day.sort_by(|a, b| {
+            a["start_date"]
+                .as_i64()
+                .unwrap_or(0)
+                .cmp(&b["start_date"].as_i64().unwrap_or(0))
+        });
+
+        let mut embed = CreateEmbed::default();
+        embed
+            .title("📅 Cours pour la semaine")
+            .color(Colour::from_rgb(114, 137, 218)) // Une couleur bleue Discord
+            .footer(|f| f.text("Mis à jour le"))
+            .timestamp(&*Utc::now().to_rfc3339());
+
+        for course in &courses_day {
+            let date = Utc
+                .timestamp_millis(course["start_date"].as_i64().unwrap_or(0))
+                .format("%d %B %Y") // Formatage de date en français
+                .to_string();
+
+            let course_name = course["name"].as_str().unwrap_or("Inconnu");
+            let teacher = course["discipline"]["teacher"]
+                .as_str()
+                .unwrap_or("Inconnu");
+            let start = course["start_date"].as_i64().unwrap_or(0);
+            let start_time = Utc
+                .timestamp_millis(start)
+                .add(chrono::Duration::hours(2))
+                .format("%H:%M")
+                .to_string();
+            let end = course["end_date"].as_i64().unwrap_or(0);
+            let end_time = Utc
+                .timestamp_millis(end)
+                .add(chrono::Duration::hours(2))
+                .format("%H:%M")
+                .to_string();
+            let room_name = course["rooms"][0]["name"].as_str().unwrap_or("Inconnu");
+
+            embed.field(
+                format!("📅 {} - 📚 {}", date, course_name),
+                format!(
+                    "👨‍🏫 Enseignant: **{}**\n⏰ Heure: **{} - {}**\n🚪 Salle: **{}**\n\n",
+                    teacher, start_time, end_time, room_name
+                ),
+                false,
+            );
         }
 
-        // Créez un embed pour chaque jour
-        for (day, day_reservations) in grouped_by_day {
-            let mut embed = CreateEmbed::default();
-            embed
-                .title(format!("Cours pour le {}", day))
-                .color(Colour::from_rgb(114, 137, 218)) // Une couleur bleue Discord
-                .footer(|f| f.text("Mis à jour le"))
-                .timestamp(&*Utc::now().to_rfc3339());
-
-            for courses_day in day_reservations {
-                let course_name = courses_day["name"].as_str().unwrap_or("Inconnu");
-                let teacher = courses_day["discipline"]["teacher"]
-                    .as_str()
-                    .unwrap_or("Inconnu");
-                let start_time = Utc
-                    .timestamp_millis(courses_day["start_date"].as_i64().unwrap_or(0))
-                    .format("%H:%M")
-                    .to_string();
-                let end_time = Utc
-                    .timestamp_millis(courses_day["end_date"].as_i64().unwrap_or(0))
-                    .format("%H:%M")
-                    .to_string();
-                let room_name = courses_day["rooms"][0]["name"]
-                    .as_str()
-                    .unwrap_or("Inconnu");
-
-                embed.field(
-                    course_name,
-                    format!(
-                        "Enseignant: **{}**\nHeure: **{} - {}**\nSalle: **{}**",
-                        teacher, start_time, end_time, room_name
-                    ),
-                    false,
-                );
-            }
-
-            // Envoyez l'embed à Discord
-            if let Err(err) = msg
-                .channel_id
-                .send_message(&ctx.http, |m| m.set_embed(embed))
-                .await
-            {
-                eprintln!("Error sending embed message: {:?}", err);
-            }
+        // Envoyez l'embed à Discord
+        if let Err(err) = msg
+            .channel_id
+            .send_message(&ctx.http, |m| m.set_embed(embed))
+            .await
+        {
+            eprintln!("Error sending embed message: {:?}", err);
         }
     }
 }
@@ -227,8 +225,8 @@ async fn planning_command(ctx: &Context, msg: &Message) {
                 let token = access_token[1].split("&").next().unwrap();
 
                 // Récupération du planning
-                let start_timestamp = Utc.ymd(2023, 10, 25).and_hms(0, 0, 0).timestamp_millis();
-                let end_timestamp = Utc.ymd(2023, 11, 25).and_hms(0, 0, 0).timestamp_millis();
+                let start_timestamp = Utc.ymd(2023, 10, 1).and_hms(0, 0, 0).timestamp_millis();
+                let end_timestamp = Utc.ymd(2023, 11, 1).and_hms(0, 0, 0).timestamp_millis();
                 let agenda_url = format!(
                     "https://api.kordis.fr/me/agenda?start={}&end={}",
                     start_timestamp, end_timestamp
@@ -241,7 +239,6 @@ async fn planning_command(ctx: &Context, msg: &Message) {
 
                 if let Ok(agenda_resp) = agenda_response {
                     let agenda: String = agenda_resp.text().await.unwrap_or_default();
-                    println!("{}", agenda);
                     format_for_discord(ctx, msg, &agenda).await;
                 } else {
                     msg.channel_id
